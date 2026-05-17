@@ -94,11 +94,13 @@ func TestBlacklistTTLBoundedByMax(t *testing.T) {
 	}
 }
 
-// TestPickRelayEndpointAllBlacklistedFallback: when every endpoint is
-// blacklisted, pickRelayEndpoint must still return a usable index — and it
-// must pick the one closest to expiry, not e.g. always index 0. This is the
-// "fallback" branch used to keep the carrier responsive during a full outage.
-func TestPickRelayEndpointAllBlacklistedFallback(t *testing.T) {
+// TestPickRelayEndpointAllBlacklistedRefuses: when every endpoint is
+// blacklisted, pickRelayEndpoint must return -1 so the caller waits out the
+// TTL instead of sending real traffic to a flagged deployment. Hammering
+// blacklisted endpoints (the previous fallback behaviour) plausibly extends
+// Apps Script's per-deployment cooldown beyond the 24h daily reset window
+// (see issues #121 and #126).
+func TestPickRelayEndpointAllBlacklistedRefuses(t *testing.T) {
 	c, err := New(Config{
 		ScriptURLs: []string{
 			"https://a.invalid/exec",
@@ -114,25 +116,73 @@ func TestPickRelayEndpointAllBlacklistedFallback(t *testing.T) {
 	now := time.Now()
 	c.endpointMu.Lock()
 	c.endpoints[0].blacklistedTill = now.Add(45 * time.Minute)
-	c.endpoints[1].blacklistedTill = now.Add(10 * time.Minute) // soonest
+	c.endpoints[1].blacklistedTill = now.Add(10 * time.Minute)
 	c.endpoints[2].blacklistedTill = now.Add(60 * time.Minute)
 	c.endpointMu.Unlock()
 
-	idx, _ := c.pickRelayEndpoint()
-	if idx != 1 {
-		t.Fatalf("fallback should pick soonest-to-expire endpoint (1); got %d", idx)
+	idx, url := c.pickRelayEndpoint()
+	if idx >= 0 || url != "" {
+		t.Fatalf("expected (-1, \"\") when all endpoints blacklisted; got (%d, %q)", idx, url)
 	}
 
+	// Sanity: when one endpoint's TTL has passed, it should now be picked.
 	c.endpointMu.Lock()
-	for i := range c.endpoints {
-		if c.endpoints[i].blacklistedTill.Equal(now.Add(45*time.Minute)) && i == 0 {
-			continue // ok
-		}
-	}
-	gotBL := c.endpoints[1].blacklistedTill
+	c.endpoints[1].blacklistedTill = now.Add(-1 * time.Second) // expired
 	c.endpointMu.Unlock()
-	if gotBL.Sub(now) < 9*time.Minute {
-		t.Fatalf("pickRelayEndpoint mutated blacklistedTill of the picked endpoint: %v", gotBL)
+	idx, _ = c.pickRelayEndpoint()
+	if idx != 1 {
+		t.Fatalf("after TTL expiry on endpoint 1, picker should select it; got %d", idx)
+	}
+}
+
+// TestPollOnce_AllBlacklistedSendsNoTraffic: integration check that no HTTP
+// request goes out when every endpoint is blacklisted. Before the fix, the
+// carrier kept POSTing to the soonest-expiring endpoint at the idle-backoff
+// rate (~4 req/sec/endpoint), 100% of which were 403'd — extending Google's
+// per-deployment penalty.
+func TestPollOnce_AllBlacklistedSendsNoTraffic(t *testing.T) {
+	aead, err := frame.NewCryptoFromHexKey(testKeyHex)
+	if err != nil {
+		t.Fatalf("crypto: %v", err)
+	}
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	_ = aead
+
+	c, err := New(Config{ScriptURLs: []string{srv.URL}, AESKeyHex: testKeyHex})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	// Manually blacklist the sole endpoint for 30 minutes.
+	c.endpointMu.Lock()
+	c.endpoints[0].blacklistedTill = time.Now().Add(30 * time.Minute)
+	c.endpoints[0].failCount = 7
+	c.endpointMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = c.Run(ctx)
+		close(done)
+	}()
+
+	// Open a session so the carrier has real TX work to do — this is exactly
+	// the scenario where the old code would hammer the blacklisted endpoint.
+	s := c.NewSession("example.com:80")
+	s.EnqueueTx([]byte("would-be-traffic"))
+
+	time.Sleep(2 * time.Second)
+	cancel()
+	<-done
+
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("expected zero requests to blacklisted endpoint over 2s, got %d", got)
 	}
 }
 
@@ -226,6 +276,17 @@ func TestSinglePostOutageSuccessRestoresTraffic(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	hitsDuringOutage := bs.hits.Load()
 	bs.outage.Store(false)
+	// Simulate the blacklist TTL elapsing. In production this happens
+	// naturally after the failCount-driven TTL (5 min → 1 h); in a 10-second
+	// integration test we force-expire so we can assert the actual rollback
+	// behaviour rather than how long we wait.
+	c.endpointMu.Lock()
+	for i := range c.endpoints {
+		c.endpoints[i].blacklistedTill = time.Time{}
+		c.endpoints[i].failCount = 0
+	}
+	c.endpointMu.Unlock()
+	c.kick()
 
 	select {
 	case got := <-s.RxChan:

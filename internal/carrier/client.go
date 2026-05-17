@@ -542,7 +542,16 @@ func (c *Client) pollOnce(ctx context.Context) bool {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		endpointIdx, scriptURL := c.pickRelayEndpoint()
 		if endpointIdx < 0 || scriptURL == "" {
-			log.Printf("[carrier] no relay script URLs are configured")
+			c.endpointMu.Lock()
+			anyConfigured := len(c.endpoints) > 0
+			c.endpointMu.Unlock()
+			if !anyConfigured {
+				log.Printf("[carrier] no relay script URLs are configured")
+			}
+			// Otherwise: all endpoints are blacklisted; per-endpoint blacklist
+			// logs were already emitted at the failing transitions. Returning
+			// false here lets the worker's idle-backoff wait out the soonest
+			// TTL without sending any traffic to flagged deployments.
 			return false
 		}
 
@@ -727,17 +736,13 @@ func (c *Client) pickRelayEndpoint() (int, string) {
 		return idx, ep.url
 	}
 
-	// All endpoints are unavailable. Pick the one that frees up soonest.
-	chosen := 0
-	soonest := c.endpoints[0].blacklistedTill
-	for i := 1; i < n; i++ {
-		if c.endpoints[i].blacklistedTill.Before(soonest) {
-			chosen = i
-			soonest = c.endpoints[i].blacklistedTill
-		}
-	}
-	c.nextEndpoint = (chosen + 1) % n
-	return chosen, c.endpoints[chosen].url
+	// All endpoints are temporarily blacklisted. Refuse to send rather than
+	// hammer already-flagged deployments. The worker loop will idle-backoff
+	// until the soonest TTL elapses; at that point the first loop above
+	// picks the newly-available endpoint. Hammering during outages plausibly
+	// extends Apps Script's per-deployment cooldown beyond the 24h daily
+	// reset window (see issues #121 and #126).
+	return -1, ""
 }
 
 func (c *Client) markEndpointSuccess(endpointIdx int) {

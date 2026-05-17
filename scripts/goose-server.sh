@@ -83,8 +83,10 @@ discover_existing() {
 
     echo -e "${YELLOW}Checking for existing GooseRelayVPN installations...${NC}"
     
-    # Check running processes
-    local p_path=$(pgrep -af "$BINARY_NAME" | grep -v "$0" | awk '{print $2}' | head -n 1 || echo "")
+    # Check running processes — exclude this script's own PID (and its subshells)
+    # so `grep` etc. invoked from here don't get mistaken for the binary.
+    local p_path
+    p_path=$(pgrep -af "$BINARY_NAME" | awk -v self="$$" -v parent="$PPID" '$1!=self && $1!=parent {print $2; exit}')
     if [ -n "$p_path" ] && [ -f "$p_path" ]; then
         EXISTING_BIN="$p_path"
         EXISTING_DIR=$(dirname "$p_path")

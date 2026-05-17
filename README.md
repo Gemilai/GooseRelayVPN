@@ -74,6 +74,14 @@ You need two separate programs:
 - **`goose-client`** — runs on **your own computer**. This is what you run every day.
 - **`goose-server`** — runs on **your VPS**. You set it up once and leave it running.
 
+> 🚀 **Linux VPS shortcut:** If your exit server is Linux and you have root, the installer script below bundles **Steps 2–7 for the server** (download, config, tunnel key, systemd unit, firewall) into one command. You still need to set up the client and Apps Script (Steps 5 and 8+) on your own machine.
+>
+> ```bash
+> bash <(curl -Ls https://raw.githubusercontent.com/Kianmhz/GooseRelayVPN/main/scripts/goose-server.sh)
+> ```
+>
+> The script verifies the release tarball against its published `SHA256SUMS.txt` before installing, generates a fresh `tunnel_key` you'll paste into the client config, and exposes `install` / `update` / `uninstall` / reconfigure menus on re-run.
+
 **Option A — Download a pre-built release (recommended):**
 
 1. Go to the [Releases page](https://github.com/kianmhz/GooseRelayVPN/releases).

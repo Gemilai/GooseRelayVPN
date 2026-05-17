@@ -74,6 +74,14 @@ Browser/App
 - **`goose-client`** — روی **کامپیوتر خودتان** اجرا می‌شود. این همان چیزی است که هر روز اجرا می‌کنید.
 - **`goose-server`** — روی **VPS** اجرا می‌شود. یک‌بار راه‌اندازی می‌کنید و همان‌جا می‌ماند.
 
+> 🚀 **میانبر برای VPS لینوکسی:** اگر سرور خروجی شما لینوکس است و دسترسی root دارید، اسکریپت نصب زیر **مراحل ۲ تا ۷ مربوط به سرور** (دانلود، تنظیمات، تولید tunnel_key، یونیت systemd، فایروال) را در یک دستور انجام می‌دهد. کلاینت و Apps Script (مراحل ۵ و ۸ به بعد) را باید خودتان روی کامپیوترتان انجام دهید.
+>
+> ```bash
+> bash <(curl -Ls https://raw.githubusercontent.com/Kianmhz/GooseRelayVPN/main/scripts/goose-server.sh)
+> ```
+>
+> اسکریپت قبل از نصب، هش tarball را با `SHA256SUMS.txt` منتشرشده در ریلیز مقایسه می‌کند، یک `tunnel_key` تازه می‌سازد که باید در کانفیگ کلاینت قرار دهید، و در اجرای بعدی منوی `install` / `update` / `uninstall` و reconfigure را نشان می‌دهد.
+
 **گزینه A — دانلود نسخه آماده (پیشنهادی):**
 
 1. به [صفحه Releases](https://github.com/kianmhz/GooseRelayVPN/releases) بروید.

@@ -8,6 +8,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 INSTALL_DIR="$HOME/goose"
+# FIXED: Restored the correct repository name
 REPO="Gemilai/GooseRelayVPN"
 
 BINARY_NAME="goose-server"

@@ -1,344 +1,348 @@
 #!/bin/bash
 
-# GooseRelayVPN Server Installer & Manager
-# Repository: https://github.com/Kianmhz/GooseRelayVPN
-
 set -e
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-INSTALL_DIR="/root/goose"
-SERVICE_NAME="goose-relay"
-REPO="Kianmhz/GooseRelayVPN"
+INSTALL_DIR="$HOME/goose"
+REPO="YOURNAME/GooseRelayVPN"
+
 BINARY_NAME="goose-server"
 CONFIG_NAME="server_config.json"
 
-# Check if running as root
-if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}This script must be run as root${NC}"
-   exit 1
-fi
-
-# Function to display the menu
 show_menu() {
-    echo -e "${GREEN}GooseRelayVPN Server Management Script${NC}"
-    echo "1) Install GooseRelayVPN"
-    echo "2) Update GooseRelayVPN"
-    echo "3) Uninstall GooseRelayVPN"
-    echo "4) Reconfigure GooseRelayVPN"
-    echo "5) Exit"
+    echo -e "${GREEN}GooseRelayVPN User-Space Manager${NC}"
+    echo "1) Install"
+    echo "2) Update"
+    echo "3) Start"
+    echo "4) Stop"
+    echo "5) Restart"
+    echo "6) Uninstall"
+    echo "7) Exit"
 }
 
-# Function to check dependencies
 check_dependencies() {
-    echo -e "${YELLOW}Checking dependencies...${NC}"
-    DEPS=("curl" "tar" "openssl" "jq")
-    MISSING_DEPS=()
+    DEPS=("curl" "tar" "openssl" "jq" "nohup")
+
     for dep in "${DEPS[@]}"; do
         if ! command -v "$dep" &> /dev/null; then
-            MISSING_DEPS+=("$dep")
+            echo -e "${RED}Missing dependency: $dep${NC}"
+            exit 1
         fi
     done
-
-    if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
-        echo -e "${YELLOW}Installing missing dependencies: ${MISSING_DEPS[*]}...${NC}"
-        apt-get update
-        apt-get install -y "${MISSING_DEPS[@]}"
-    fi
 }
 
-# Function to get latest version from GitHub
 get_latest_version() {
     curl -s "https://api.github.com/repos/$REPO/releases/latest" | jq -r .tag_name
 }
 
-# Function to get version of a binary
-get_bin_version() {
-    local bin_path=$1
-    if [ ! -f "$bin_path" ]; then echo "none"; return; fi
-    
-    # 1. Try -version flag
-    local ver=$("$bin_path" -version 2>/dev/null | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+$" || echo "")
-    if [ -n "$ver" ]; then echo "$ver"; return; fi
-    
-    # 2. Try strings extraction
-    ver=$(strings "$bin_path" | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+$" | head -n 1 || echo "")
-    if [ -n "$ver" ]; then echo "$ver"; return; fi
-    
-    echo "unknown"
-}
-
-# Function to discover existing installation
-discover_existing() {
-    # Check our standard path first
-    if [ -f "$INSTALL_DIR/$BINARY_NAME" ]; then
-        EXISTING_BIN="$INSTALL_DIR/$BINARY_NAME"
-        EXISTING_DIR="$INSTALL_DIR"
-        return
-    fi
-
-    echo -e "${YELLOW}Checking for existing GooseRelayVPN installations...${NC}"
-    
-    # Check running processes — exclude this script's own PID (and its subshells)
-    # so `grep` etc. invoked from here don't get mistaken for the binary.
-    local p_path
-    p_path=$(pgrep -af "$BINARY_NAME" | awk -v self="$$" -v parent="$PPID" '$1!=self && $1!=parent {print $2; exit}')
-    if [ -n "$p_path" ] && [ -f "$p_path" ]; then
-        EXISTING_BIN="$p_path"
-        EXISTING_DIR=$(dirname "$p_path")
-        return
-    fi
-
-    # Check systemd services
-    local s_path=$(systemctl show -p FragmentPath "$SERVICE_NAME" 2>/dev/null | cut -d= -f2)
-    if [ -n "$s_path" ] && [ -f "$s_path" ]; then
-        local exec_line=$(grep "ExecStart=" "$s_path" | cut -d= -f2 | awk '{print $1}')
-        if [ -n "$exec_line" ] && [ -f "$exec_line" ]; then
-            EXISTING_BIN="$exec_line"
-            EXISTING_DIR=$(dirname "$exec_line")
-            return
-        fi
-    fi
-
-    # Common locations
-    LOCATIONS=("/usr/local/bin/$BINARY_NAME" "/usr/bin/$BINARY_NAME" "/root/$BINARY_NAME")
-    for loc in "${LOCATIONS[@]}"; do
-        if [ -f "$loc" ]; then
-            EXISTING_BIN="$loc"
-            EXISTING_DIR=$(dirname "$loc")
-            return
-        fi
-    done
-}
-
-# Function to detect platform
 get_platform() {
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
     ARCH=$(uname -m)
+
     case "$ARCH" in
         x86_64) ARCH="amd64" ;;
         aarch64) ARCH="arm64" ;;
         armv7l) ARCH="armv7" ;;
-        *) echo -e "${RED}Unsupported architecture: $ARCH${NC}"; exit 1 ;;
+        *)
+            echo -e "${RED}Unsupported architecture: $ARCH${NC}"
+            exit 1
+            ;;
     esac
+
     echo "${OS}-${ARCH}"
 }
 
-# Function to install/update the server
-install_or_update() {
-    local is_update=$1
-    # Resolve dependencies first: get_latest_version (and the config-writing
-    # block further down) shells out to jq, so on a fresh VPS without jq
-    # pre-installed the script would otherwise die on line 56 with
-    # "jq: command not found" before ever reaching its own dependency
-    # installer. Fixes #148.
-    check_dependencies
-    discover_existing
+create_config() {
+    if [ ! -f "$INSTALL_DIR/$CONFIG_NAME" ]; then
 
-    LATEST_VERSION=$(get_latest_version)
-    
-    if [ -n "$EXISTING_BIN" ]; then
-        CURRENT_VERSION=$(get_bin_version "$EXISTING_BIN")
-        echo -e "Found existing installation at ${YELLOW}$EXISTING_BIN${NC} (Version: ${GREEN}$CURRENT_VERSION${NC})"
-        
-        if [ "$CURRENT_VERSION" == "$LATEST_VERSION" ] && [ "$is_update" == "true" ]; then
-            echo -e "${GREEN}GooseRelayVPN is already up to date.${NC}"
-            read -p "Force update anyway? (y/n): " force
-            if [[ "$force" != "y" ]]; then return; fi
-        fi
+        echo -e "${YELLOW}Creating config...${NC}"
 
-        if [ "$EXISTING_DIR" != "$INSTALL_DIR" ]; then
-            echo -e "${YELLOW}Migration needed:${NC} Existing installation is in $EXISTING_DIR. Will move to $INSTALL_DIR."
-            read -p "Proceed with migration and update? (y/n): " proceed
-            if [[ "$proceed" != "y" ]]; then return; fi
-        fi
-    else
-        if [ "$is_update" == "true" ]; then
-            echo -e "${RED}No existing installation found to update.${NC}"
-            return
-        fi
-        echo -e "${YELLOW}Installing GooseRelayVPN $LATEST_VERSION...${NC}"
+        curl -s \
+        "https://raw.githubusercontent.com/$REPO/main/server_config.example.json" \
+        -o "$INSTALL_DIR/$CONFIG_NAME"
+
+        TUNNEL_KEY=$(openssl rand -hex 32)
+
+        jq --arg key "$TUNNEL_KEY" \
+        '.tunnel_key = $key' \
+        "$INSTALL_DIR/$CONFIG_NAME" \
+        > "$INSTALL_DIR/tmp.json"
+
+        mv "$INSTALL_DIR/tmp.json" \
+        "$INSTALL_DIR/$CONFIG_NAME"
+
+        echo -e "${GREEN}Tunnel Key:${NC} $TUNNEL_KEY"
+
+        echo ""
+        echo "Choose server port:"
+        echo "Recommended:"
+        echo "2053 / 2083 / 2087 / 2096 / 8443"
+
+        read -p "Port [2053]: " PORT
+
+        PORT=${PORT:-2053}
+
+        jq --argjson port "$PORT" \
+        '.server_port = $port' \
+        "$INSTALL_DIR/$CONFIG_NAME" \
+        > "$INSTALL_DIR/tmp.json"
+
+        mv "$INSTALL_DIR/tmp.json" \
+        "$INSTALL_DIR/$CONFIG_NAME"
+
+    fi
+}
+
+create_scripts() {
+
+cat > "$INSTALL_DIR/run.sh" <<EOF
+#!/bin/bash
+
+cd "$INSTALL_DIR"
+
+while true; do
+
+    "$INSTALL_DIR/$BINARY_NAME" \
+    -config "$INSTALL_DIR/$CONFIG_NAME"
+
+    echo "\$(date) crashed restarting..." >> crash.log
+
+    sleep 5
+
+done
+EOF
+
+chmod +x "$INSTALL_DIR/run.sh"
+
+cat > "$INSTALL_DIR/start.sh" <<EOF
+#!/bin/bash
+
+cd "$INSTALL_DIR"
+
+if [ -f goose.pid ]; then
+
+    PID=\$(cat goose.pid)
+
+    if ps -p \$PID > /dev/null 2>&1; then
+        echo "Already running"
+        exit 0
     fi
 
-    # 1. Shutdown if running
-    echo -e "${YELLOW}Stopping service...${NC}"
-    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-    # Also kill any orphaned processes
+fi
+
+nohup bash "$INSTALL_DIR/run.sh" \
+>> "$INSTALL_DIR/server.log" 2>&1 &
+
+echo \$! > goose.pid
+
+echo "Started"
+EOF
+
+chmod +x "$INSTALL_DIR/start.sh"
+
+cat > "$INSTALL_DIR/stop.sh" <<EOF
+#!/bin/bash
+
+cd "$INSTALL_DIR"
+
+if [ -f goose.pid ]; then
+
+    kill \$(cat goose.pid) 2>/dev/null || true
+
+    rm -f goose.pid
+
+    echo "Stopped"
+
+else
+
     pkill -f "$BINARY_NAME" || true
 
-    # 2. Prepare directory
+fi
+EOF
+
+chmod +x "$INSTALL_DIR/stop.sh"
+
+cat > "$INSTALL_DIR/restart.sh" <<EOF
+#!/bin/bash
+
+"$INSTALL_DIR/stop.sh"
+
+sleep 2
+
+"$INSTALL_DIR/start.sh"
+EOF
+
+chmod +x "$INSTALL_DIR/restart.sh"
+
+}
+
+setup_cron() {
+
+    CRON1="@reboot sleep 15 && $INSTALL_DIR/start.sh"
+
+    CRON2="* * * * * pgrep -f $BINARY_NAME >/dev/null || $INSTALL_DIR/start.sh"
+
+    (
+        crontab -l 2>/dev/null
+        echo "$CRON1"
+        echo "$CRON2"
+    ) | sort -u | crontab -
+}
+
+install_app() {
+
+    check_dependencies
+
     mkdir -p "$INSTALL_DIR"
-    
-    # 3. Handle config migration/creation
-    if [ -n "$EXISTING_DIR" ] && [ -f "$EXISTING_DIR/$CONFIG_NAME" ] && [ "$EXISTING_DIR" != "$INSTALL_DIR" ]; then
-        echo -e "${YELLOW}Migrating configuration from $EXISTING_DIR...${NC}"
-        cp "$EXISTING_DIR/$CONFIG_NAME" "$INSTALL_DIR/$CONFIG_NAME"
-    elif [ ! -f "$INSTALL_DIR/$CONFIG_NAME" ]; then
-        echo -e "${YELLOW}Creating fresh configuration...${NC}"
-        curl -s "https://raw.githubusercontent.com/$REPO/main/server_config.example.json" -o "$INSTALL_DIR/$CONFIG_NAME"
-        TUNNEL_KEY=$(openssl rand -hex 32)
-        jq --arg key "$TUNNEL_KEY" '.tunnel_key = $key' "$INSTALL_DIR/$CONFIG_NAME" > "$INSTALL_DIR/$CONFIG_NAME.tmp" && mv "$INSTALL_DIR/$CONFIG_NAME.tmp" "$INSTALL_DIR/$CONFIG_NAME"
-        echo -e "${GREEN}Generated tunnel_key: $TUNNEL_KEY${NC}"
-        
-        echo -e "\nRoute all outbound connections through a local SOCKS5 proxy? (Cloudflare WARP)"
-        read -p "Activate upstream_proxy? (y/n): " use_proxy
-        if [[ "$use_proxy" == "y" ]]; then
-            jq '.upstream_proxy = "socks5://127.0.0.1:40000"' "$INSTALL_DIR/$CONFIG_NAME" > "$INSTALL_DIR/$CONFIG_NAME.tmp" && mv "$INSTALL_DIR/$CONFIG_NAME.tmp" "$INSTALL_DIR/$CONFIG_NAME"
-        else
-            jq 'del(.upstream_proxy)' "$INSTALL_DIR/$CONFIG_NAME" > "$INSTALL_DIR/$CONFIG_NAME.tmp" && mv "$INSTALL_DIR/$CONFIG_NAME.tmp" "$INSTALL_DIR/$CONFIG_NAME"
-        fi
-    fi
 
-    # 4. Download and Install Binary
+    cd "$INSTALL_DIR"
+
+    LATEST_VERSION=$(get_latest_version)
+
     PLATFORM=$(get_platform)
+
     TARBALL_NAME="GooseRelayVPN-server-$LATEST_VERSION-$PLATFORM.tar.gz"
+
     DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST_VERSION/$TARBALL_NAME"
-    SUMS_URL="https://github.com/$REPO/releases/download/$LATEST_VERSION/SHA256SUMS.txt"
-    echo -e "${YELLOW}Downloading $LATEST_VERSION for $PLATFORM...${NC}"
-    curl -fL "$DOWNLOAD_URL" -o "/tmp/goose.tar.gz"
-    curl -fLs "$SUMS_URL" -o "/tmp/goose.sums.txt"
 
-    echo -e "${YELLOW}Verifying checksum...${NC}"
-    EXPECTED=$(awk -v f="$TARBALL_NAME" '{sub(/^\.\//,"",$2)} $2==f {print $1}' "/tmp/goose.sums.txt")
-    ACTUAL=$(sha256sum "/tmp/goose.tar.gz" | awk '{print $1}')
-    if [ -z "$EXPECTED" ]; then
-        echo -e "${RED}Could not find $TARBALL_NAME in SHA256SUMS.txt — aborting${NC}"
-        rm -f /tmp/goose.tar.gz /tmp/goose.sums.txt
-        exit 1
-    fi
-    if [ "$EXPECTED" != "$ACTUAL" ]; then
-        echo -e "${RED}Checksum mismatch for $TARBALL_NAME${NC}"
-        echo -e "${RED}  expected: $EXPECTED${NC}"
-        echo -e "${RED}  actual:   $ACTUAL${NC}"
-        rm -f /tmp/goose.tar.gz /tmp/goose.sums.txt
-        exit 1
-    fi
-    echo -e "${GREEN}Checksum OK${NC}"
+    echo -e "${YELLOW}Downloading:${NC} $TARBALL_NAME"
 
-    tar -xzf "/tmp/goose.tar.gz" -C "$INSTALL_DIR"
-    rm /tmp/goose.tar.gz /tmp/goose.sums.txt
-    echo "$LATEST_VERSION" > "$INSTALL_DIR/.version"
+    curl -fL "$DOWNLOAD_URL" -o goose.tar.gz
 
-    if [ ! -f "$INSTALL_DIR/$BINARY_NAME" ]; then
-        FIND_BIN=$(find "$INSTALL_DIR" -name "$BINARY_NAME" -type f | head -n 1)
-        [ -n "$FIND_BIN" ] && mv "$FIND_BIN" "$INSTALL_DIR/$BINARY_NAME"
-    fi
+    tar -xzf goose.tar.gz
+
+    rm -f goose.tar.gz
+
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
-    # 5. Setup/Update Service
-    create_service
-    
-    # 6. Firewall
-    configure_firewall
+    create_config
 
-    echo -e "${GREEN}GooseRelayVPN is now running from $INSTALL_DIR!${NC}"
-    systemctl status "$SERVICE_NAME" --no-pager
+    create_scripts
+
+    setup_cron
+
+    "$INSTALL_DIR/start.sh"
+
+    echo ""
+    echo -e "${GREEN}Installed Successfully${NC}"
+    echo ""
+    echo "Directory:"
+    echo "$INSTALL_DIR"
+    echo ""
+    echo "Commands:"
+    echo "$INSTALL_DIR/start.sh"
+    echo "$INSTALL_DIR/stop.sh"
+    echo "$INSTALL_DIR/restart.sh"
 }
 
-create_service() {
-    echo -e "${YELLOW}Configuring systemd service...${NC}"
-    cat <<EOF > /etc/systemd/system/$SERVICE_NAME.service
-[Unit]
-Description=GooseRelayVPN exit server
-After=network.target
+update_app() {
 
-[Service]
-Type=simple
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/$BINARY_NAME -config $INSTALL_DIR/$CONFIG_NAME
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
-    systemctl restart "$SERVICE_NAME"
-}
-
-configure_firewall() {
-    PORT=$(jq -r '.server_port // 8443' "$INSTALL_DIR/$CONFIG_NAME")
-    if command -v ufw &> /dev/null; then
-        ufw allow "$PORT"/tcp
-    elif command -v iptables &> /dev/null; then
-        iptables -A INPUT -p tcp --dport "$PORT" -j ACCEPT
+    if [ ! -d "$INSTALL_DIR" ]; then
+        echo "Not installed"
+        exit 1
     fi
+
+    "$INSTALL_DIR/stop.sh"
+
+    cd "$INSTALL_DIR"
+
+    LATEST_VERSION=$(get_latest_version)
+
+    PLATFORM=$(get_platform)
+
+    TARBALL_NAME="GooseRelayVPN-server-$LATEST_VERSION-$PLATFORM.tar.gz"
+
+    DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST_VERSION/$TARBALL_NAME"
+
+    curl -fL "$DOWNLOAD_URL" -o goose.tar.gz
+
+    tar -xzf goose.tar.gz
+
+    rm -f goose.tar.gz
+
+    chmod +x "$INSTALL_DIR/$BINARY_NAME"
+
+    "$INSTALL_DIR/start.sh"
+
+    echo -e "${GREEN}Updated${NC}"
 }
 
-uninstall_server() {
-    discover_existing
-    if [ -z "$EXISTING_BIN" ]; then
-        echo -e "${RED}GooseRelayVPN is not installed.${NC}"
-        return
-    fi
-    read -p "Uninstall GooseRelayVPN from $EXISTING_DIR? (y/n): " choice
-    if [[ "$choice" == "y" ]]; then
-        systemctl stop "$SERVICE_NAME" || true
-        systemctl disable "$SERVICE_NAME" || true
-        rm -f /etc/systemd/system/$SERVICE_NAME.service
-        systemctl daemon-reload
+uninstall_app() {
+
+    if [ -d "$INSTALL_DIR" ]; then
+
+        "$INSTALL_DIR/stop.sh"
+
         rm -rf "$INSTALL_DIR"
-        # If it was elsewhere, we don't necessarily want to rm -rf that entire dir
-        # but we should remove the binary
-        [ "$EXISTING_DIR" != "$INSTALL_DIR" ] && rm -f "$EXISTING_BIN"
-        echo -e "${GREEN}Uninstalled successfully.${NC}"
-    fi
-}
 
-reconfigure_server() {
-    if [ ! -f "$INSTALL_DIR/$CONFIG_NAME" ]; then
-        echo -e "${RED}Configuration not found at $INSTALL_DIR/$CONFIG_NAME${NC}"
-        return
+        crontab -l 2>/dev/null \
+        | grep -v "$INSTALL_DIR/start.sh" \
+        | grep -v "$BINARY_NAME" \
+        | crontab -
+
+        echo -e "${GREEN}Uninstalled${NC}"
     fi
-    echo "1) Regenerate tunnel_key"
-    echo "2) Toggle upstream_proxy"
-    read -p "Choice: " choice
-    case $choice in
-        1)
-            NEW_KEY=$(openssl rand -hex 32)
-            jq --arg key "$NEW_KEY" '.tunnel_key = $key' "$INSTALL_DIR/$CONFIG_NAME" > "$INSTALL_DIR/$CONFIG_NAME.tmp" && mv "$INSTALL_DIR/$CONFIG_NAME.tmp" "$INSTALL_DIR/$CONFIG_NAME"
-            echo -e "${GREEN}New tunnel_key: $NEW_KEY${NC}"
-            systemctl restart "$SERVICE_NAME"
-            ;;
-        2)
-            HAS_PROXY=$(jq '.upstream_proxy' "$INSTALL_DIR/$CONFIG_NAME")
-            if [ "$HAS_PROXY" != "null" ]; then
-                jq 'del(.upstream_proxy)' "$INSTALL_DIR/$CONFIG_NAME" > "$INSTALL_DIR/$CONFIG_NAME.tmp" && mv "$INSTALL_DIR/$CONFIG_NAME.tmp" "$INSTALL_DIR/$CONFIG_NAME"
-                echo "Upstream proxy disabled."
-            else
-                jq '.upstream_proxy = "socks5://127.0.0.1:40000"' "$INSTALL_DIR/$CONFIG_NAME" > "$INSTALL_DIR/$CONFIG_NAME.tmp" && mv "$INSTALL_DIR/$CONFIG_NAME.tmp" "$INSTALL_DIR/$CONFIG_NAME"
-                echo "Upstream proxy enabled."
-            fi
-            systemctl restart "$SERVICE_NAME"
-            ;;
-    esac
 }
 
 if [ "$#" -gt 0 ]; then
+
     case $1 in
-        install) install_or_update "false" ;;
-        update) install_or_update "true" ;;
-        uninstall) uninstall_server ;;
-        *) show_menu ;;
+        install)
+            install_app
+            ;;
+        update)
+            update_app
+            ;;
+        start)
+            "$INSTALL_DIR/start.sh"
+            ;;
+        stop)
+            "$INSTALL_DIR/stop.sh"
+            ;;
+        restart)
+            "$INSTALL_DIR/restart.sh"
+            ;;
+        uninstall)
+            uninstall_app
+            ;;
     esac
-else
-    while true; do
-        show_menu
-        read -p "Enter choice [1-5]: " choice
-        case $choice in
-            1) install_or_update "false" ;;
-            2) install_or_update "true" ;;
-            3) uninstall_server ;;
-            4) reconfigure_server ;;
-            5) exit 0 ;;
-        esac
-        echo ""
-    done
+
+    exit 0
 fi
+
+while true; do
+
+    show_menu
+
+    read -p "Choice: " choice
+
+    case $choice in
+        1)
+            install_app
+            ;;
+        2)
+            update_app
+            ;;
+        3)
+            "$INSTALL_DIR/start.sh"
+            ;;
+        4)
+            "$INSTALL_DIR/stop.sh"
+            ;;
+        5)
+            "$INSTALL_DIR/restart.sh"
+            ;;
+        6)
+            uninstall_app
+            ;;
+        7)
+            exit 0
+            ;;
+    esac
+
+    echo ""
+done

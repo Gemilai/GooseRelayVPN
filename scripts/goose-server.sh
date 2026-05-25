@@ -83,7 +83,7 @@ get_platform() {
 }
 
 create_user_scripts() {
-    # run.sh (Infinite loop to keep it alive like systemd Restart=always)
+    # run.sh (Infinite loop to keep it alive)
     cat > "$INSTALL_DIR/run.sh" <<EOF
 #!/bin/bash
 cd "$INSTALL_DIR"
@@ -95,7 +95,7 @@ done
 EOF
     chmod +x "$INSTALL_DIR/run.sh"
 
-    # start.sh (Runs run.sh in background via nohup)
+    # start.sh
     cat > "$INSTALL_DIR/start.sh" <<EOF
 #!/bin/bash
 cd "$INSTALL_DIR"
@@ -119,7 +119,6 @@ cd "$INSTALL_DIR"
 if [ -f goose.pid ]; then
     PID=\$(cat goose.pid)
     kill \$PID 2>/dev/null || true
-    # Also kill the child binary process
     pkill -f "$BINARY_NAME -config" || true
     rm -f goose.pid
     echo -e "\033[0;31mGooseRelayVPN Stopped\033[0m"
@@ -200,7 +199,7 @@ install_or_update() {
         fi
     fi
 
-    # 4. Download and Install Binary with Checksum verification
+    # 4. Download and Verify Binary
     PLATFORM=$(get_platform)
     TARBALL_NAME="GooseRelayVPN-server-$LATEST_VERSION-$PLATFORM.tar.gz"
     DOWNLOAD_URL="https://github.com/$BIN_REPO/releases/download/$LATEST_VERSION/$TARBALL_NAME"
@@ -221,20 +220,25 @@ install_or_update() {
     fi
     if [ "$EXPECTED" != "$ACTUAL" ]; then
         echo -e "${RED}Checksum mismatch for $TARBALL_NAME${NC}"
-        echo -e "${RED}  expected: $EXPECTED${NC}"
-        echo -e "${RED}  actual:   $ACTUAL${NC}"
         rm -f /tmp/goose.tar.gz /tmp/goose.sums.txt
         exit 1
     fi
     echo -e "${GREEN}Checksum OK${NC}"
 
+    # 5. Extract and locate binary
     tar -xzf "/tmp/goose.tar.gz" -C "$INSTALL_DIR"
     rm /tmp/goose.tar.gz /tmp/goose.sums.txt
 
-    # 5. Extract binary handling
     if [ ! -f "$INSTALL_DIR/$BINARY_NAME" ]; then
-        FIND_BIN=$(find "$INSTALL_DIR" -name "$BINARY_NAME" -type f | head -n 1)
-        [ -n "$FIND_BIN" ] && mv "$FIND_BIN" "$INSTALL_DIR/$BINARY_NAME"
+        FIND_BIN=$(find "$INSTALL_DIR" -type f -name "$BINARY_NAME" | head -n 1)
+        if [ -n "$FIND_BIN" ]; then
+            mv "$FIND_BIN" "$INSTALL_DIR/$BINARY_NAME"
+            # Cleanup any empty leftover directories from extraction
+            find "$INSTALL_DIR" -type d -empty -delete 2>/dev/null || true
+        else
+            echo -e "${RED}Error: Could not locate the binary after extraction.${NC}"
+            exit 1
+        fi
     fi
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
@@ -289,7 +293,6 @@ uninstall_server() {
     read -p "Uninstall GooseRelayVPN from $INSTALL_DIR? (y/n): " choice
     if [[ "$choice" == "y" ]]; then
         "$INSTALL_DIR/stop.sh" || true
-        # Remove from cron
         crontab -l 2>/dev/null | grep -v "$INSTALL_DIR/start.sh" | crontab -
         rm -rf "$INSTALL_DIR"
         echo -e "${GREEN}Uninstalled successfully.${NC}"

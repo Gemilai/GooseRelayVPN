@@ -8,7 +8,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 INSTALL_DIR="$HOME/goose"
-REPO="YOURNAME/GooseRelayVPN"
+REPO="Gemilai/GooseRelayVPN"
 
 BINARY_NAME="goose-server"
 CONFIG_NAME="server_config.json"

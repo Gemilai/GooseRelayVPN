@@ -9,7 +9,7 @@ NC='\033[0m'
 
 INSTALL_DIR="$HOME/goose"
 # FIXED: Restored the correct repository name
-REPO="Gemilai/GooseRelayVPN"
+REPO="Kianmhz/GooseRelayVPN"
 
 BINARY_NAME="goose-server"
 CONFIG_NAME="server_config.json"

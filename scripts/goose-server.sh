@@ -8,8 +8,16 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 INSTALL_DIR="$HOME/goose"
-# FIXED: Restored the correct repository name
-REPO="Kianmhz/GooseRelayVPN"
+
+# ==========================================
+# HYBRID REPOSITORY SETUP
+# ==========================================
+# 1. Grabs the heavy, compiled binaries from the original creator
+BIN_REPO="Kianmhz/GooseRelayVPN"
+
+# 2. Grabs the configuration files (and any future script components) from your fork
+SCRIPT_REPO="Gemilai/GooseRelayVPN"
+# ==========================================
 
 BINARY_NAME="goose-server"
 CONFIG_NAME="server_config.json"
@@ -37,7 +45,8 @@ check_dependencies() {
 }
 
 get_latest_version() {
-    curl -s "https://api.github.com/repos/$REPO/releases/latest" | jq -r .tag_name
+    # Fetches the version number from the original BIN_REPO
+    curl -s "https://api.github.com/repos/$BIN_REPO/releases/latest" | jq -r .tag_name
 }
 
 get_platform() {
@@ -62,8 +71,9 @@ create_config() {
 
         echo -e "${YELLOW}Creating config...${NC}"
 
+        # Fetches the config template from your SCRIPT_REPO fork
         curl -s \
-        "https://raw.githubusercontent.com/$REPO/main/server_config.example.json" \
+        "https://raw.githubusercontent.com/$SCRIPT_REPO/main/server_config.example.json" \
         -o "$INSTALL_DIR/$CONFIG_NAME"
 
         TUNNEL_KEY=$(openssl rand -hex 32)
@@ -208,7 +218,8 @@ install_app() {
 
     TARBALL_NAME="GooseRelayVPN-server-$LATEST_VERSION-$PLATFORM.tar.gz"
 
-    DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST_VERSION/$TARBALL_NAME"
+    # Downloads the binary from the original BIN_REPO
+    DOWNLOAD_URL="https://github.com/$BIN_REPO/releases/download/$LATEST_VERSION/$TARBALL_NAME"
 
     echo -e "${YELLOW}Downloading:${NC} $TARBALL_NAME"
 
@@ -257,7 +268,8 @@ update_app() {
 
     TARBALL_NAME="GooseRelayVPN-server-$LATEST_VERSION-$PLATFORM.tar.gz"
 
-    DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST_VERSION/$TARBALL_NAME"
+    # Downloads the binary from the original BIN_REPO
+    DOWNLOAD_URL="https://github.com/$BIN_REPO/releases/download/$LATEST_VERSION/$TARBALL_NAME"
 
     curl -fL "$DOWNLOAD_URL" -o goose.tar.gz
 
